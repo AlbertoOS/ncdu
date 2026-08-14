@@ -15,7 +15,7 @@ The upstream `zig` branch includes the [MIT License](https://g.blicky.net/ncdu.g
 
 ## Synchronization
 
-GitHub Actions runs the mirror job monthly, at **05:17 UTC on the first day of each month**, and can also be started manually from the **Actions → Sync ncdu upstream → Run workflow** page.
+GitHub Actions runs the mirror job monthly, at **05:17 UTC on the first day of each month**, and can also be started manually from the **Actions → Sync ncdu upstream → Run workflow** page. Each run reads the advertised ref manifest over HTTPS, obtains the Git object pack from the upstream Git service, and rejects the mirror unless every branch and tag hash matches that HTTPS manifest.
 
 The `upstream/*` branches and all tags are managed by the mirror. Do not create commits or tags in those namespaces: a later synchronization may replace them to match upstream. The `main` branch contains only this mirror documentation and its automation.
 

@@ -13,7 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UPSTREAM_URL: https://g.blicky.net/ncdu.git/
+  UPSTREAM_HTTPS: https://g.blicky.net/ncdu.git/
+  UPSTREAM_GIT: git://g.blicky.net/ncdu.git
 
 jobs:
   sync:
@@ -21,14 +22,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Clone the upstream mirror with bounded retries
+      - name: Fetch the authoritative HTTPS ref manifest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/upstream-refs.txt"
+          git ls-remote --heads --tags "$UPSTREAM_HTTPS" \
+            | awk '$2 !~ /\\^\\{\\}$/ { print $1 " " $2 }' \
+            | LC_ALL=C sort > "$manifest"
+          test -s "$manifest"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: Clone and verify the upstream mirror with bounded retries
         id: clone
         shell: bash
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
         run: |
           set -euo pipefail
           mirror="$RUNNER_TEMP/ncdu-upstream.git"
           for attempt in 1 2 3; do
-            if git clone --mirror "$UPSTREAM_URL" "$mirror"; then
+            if git clone --mirror "$UPSTREAM_GIT" "$mirror"; then
+              actual="$RUNNER_TEMP/cloned-refs.txt"
+              git -C "$mirror" for-each-ref --format='%(objectname) %(refname)' \
+                refs/heads refs/tags | LC_ALL=C sort > "$actual"
+              diff -u "$MANIFEST" "$actual"
               echo "mirror=$mirror" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -37,7 +56,7 @@ jobs:
               sleep "$((attempt * 60))"
             fi
           done
-          echo "Unable to clone upstream after three attempts." >&2
+          echo "Unable to clone and verify upstream after three attempts." >&2
           exit 1
 
       - name: Synchronize managed refs
@@ -62,7 +81,7 @@ jobs:
           {
             echo "## ncdu upstream synchronization"
             echo
-            echo "- Upstream: \`$UPSTREAM_URL\`"
+            echo "- Upstream: \`$UPSTREAM_HTTPS\`"
             echo "- Mirrored branches: $branches"
             echo "- Mirrored tags: $tags"
             echo "- Managed branch namespace: \`upstream/*\`"
