@@ -15,6 +15,7 @@ concurrency:
 env:
   UPSTREAM_HTTPS: https://g.blicky.net/ncdu.git/
   UPSTREAM_GIT: git://g.blicky.net/ncdu.git
+  UPSTREAM_DEFAULT_BRANCH: zig
 
 jobs:
   sync:
@@ -59,7 +60,7 @@ jobs:
           echo "Unable to clone and verify upstream after three attempts." >&2
           exit 1
 
-      - name: Synchronize managed refs
+      - name: Synchronize managed refs and the default source branch
         shell: bash
         env:
           MIRROR: ${{ steps.clone.outputs.mirror }}
@@ -77,6 +78,32 @@ jobs:
           git -C "$MIRROR" push --atomic --prune destination \
             'refs/tags/*:refs/tags/*'
 
+          # Preserve the scheduler on main while making its source tree track upstream's default branch.
+          # main is always rebuilt from the verified upstream default commit plus these two mirror files.
+          git -C "$MIRROR" fetch destination \
+            '+refs/heads/main:refs/heads/mirror-main'
+          overlay="$RUNNER_TEMP/default-branch"
+          git -C "$MIRROR" worktree add --detach "$overlay" \
+            "refs/heads/$UPSTREAM_DEFAULT_BRANCH"
+          mkdir -p "$overlay/.github/workflows"
+          git -C "$MIRROR" show \
+            'refs/heads/mirror-main:.github/workflows/sync-upstream.yml' \
+            > "$overlay/.github/workflows/sync-upstream.yml"
+          git -C "$MIRROR" show 'refs/heads/mirror-main:.github/MIRROR.md' \
+            > "$overlay/.github/MIRROR.md"
+          git -C "$overlay" config user.name 'github-actions[bot]'
+          git -C "$overlay" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$overlay" add .github/workflows/sync-upstream.yml .github/MIRROR.md
+          current=$(git -C "$MIRROR" rev-parse refs/heads/mirror-main)
+          if git -C "$overlay" diff --quiet refs/heads/mirror-main --; then
+            echo "Default branch already matches the verified upstream source."
+          else
+            git -C "$overlay" commit -m \
+              "chore: retain mirror automation atop upstream $(git -C "$MIRROR" rev-parse --short "refs/heads/$UPSTREAM_DEFAULT_BRANCH")"
+            git -C "$overlay" push --force-with-lease="refs/heads/main:$current" \
+              destination HEAD:refs/heads/main
+          fi
+
           branches=$(git -C "$MIRROR" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
           tags=$(git -C "$MIRROR" for-each-ref --format='%(refname)' refs/tags | wc -l | tr -d ' ')
           {
@@ -85,5 +112,6 @@ jobs:
             echo "- Upstream: \`$UPSTREAM_HTTPS\`"
             echo "- Mirrored branches: $branches"
             echo "- Mirrored tags: $tags"
-            echo "- Managed branch namespace: \`upstream/*\`"
+            echo "- Clean source branches: \`upstream/*\`"
+            echo "- Default branch: \`main\`, based on upstream \`$UPSTREAM_DEFAULT_BRANCH\`"
           } >> "$GITHUB_STEP_SUMMARY"
