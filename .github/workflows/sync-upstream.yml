@@ -63,6 +63,7 @@ jobs:
         shell: bash
         env:
           MIRROR: ${{ steps.clone.outputs.mirror }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git -C "$MIRROR" remote add destination \
