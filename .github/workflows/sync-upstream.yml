@@ -1,0 +1,69 @@
+name: Sync ncdu upstream
+
+on:
+  schedule:
+    - cron: "17 5 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ncdu-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://g.blicky.net/ncdu.git/
+
+jobs:
+  sync:
+    name: Mirror upstream branches and tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Clone the upstream mirror with bounded retries
+        id: clone
+        shell: bash
+        run: |
+          set -euo pipefail
+          mirror="$RUNNER_TEMP/ncdu-upstream.git"
+          for attempt in 1 2 3; do
+            if git clone --mirror "$UPSTREAM_URL" "$mirror"; then
+              echo "mirror=$mirror" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            rm -rf "$mirror"
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$((attempt * 60))"
+            fi
+          done
+          echo "Unable to clone upstream after three attempts." >&2
+          exit 1
+
+      - name: Synchronize managed refs
+        shell: bash
+        env:
+          MIRROR: ${{ steps.clone.outputs.mirror }}
+        run: |
+          set -euo pipefail
+          git -C "$MIRROR" remote add destination \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Only the managed upstream/* namespace may be force-updated or pruned.
+          git -C "$MIRROR" push --atomic --force --prune destination \
+            '+refs/heads/*:refs/heads/upstream/*'
+
+          # Tags are copied without force. A moved/conflicting tag fails safely for review.
+          git -C "$MIRROR" push --atomic --prune destination \
+            'refs/tags/*:refs/tags/*'
+
+          branches=$(git -C "$MIRROR" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+          tags=$(git -C "$MIRROR" for-each-ref --format='%(refname)' refs/tags | wc -l | tr -d ' ')
+          {
+            echo "## ncdu upstream synchronization"
+            echo
+            echo "- Upstream: \`$UPSTREAM_URL\`"
+            echo "- Mirrored branches: $branches"
+            echo "- Mirrored tags: $tags"
+            echo "- Managed branch namespace: \`upstream/*\`"
+          } >> "$GITHUB_STEP_SUMMARY"
