@@ -1,0 +1,117 @@
+name: Sync ncdu upstream
+
+on:
+  schedule:
+    - cron: "17 5 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ncdu-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_HTTPS: https://g.blicky.net/ncdu.git/
+  UPSTREAM_GIT: git://g.blicky.net/ncdu.git
+  UPSTREAM_DEFAULT_BRANCH: zig
+
+jobs:
+  sync:
+    name: Mirror upstream branches and tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch the authoritative HTTPS ref manifest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/upstream-refs.txt"
+          git ls-remote --heads --tags "$UPSTREAM_HTTPS" \
+            | awk '$2 !~ /\^\{\}$/ { print $1 " " $2 }' \
+            | LC_ALL=C sort > "$manifest"
+          test -s "$manifest"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: Clone and verify the upstream mirror with bounded retries
+        id: clone
+        shell: bash
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          mirror="$RUNNER_TEMP/ncdu-upstream.git"
+          for attempt in 1 2 3; do
+            if git clone --mirror "$UPSTREAM_GIT" "$mirror"; then
+              actual="$RUNNER_TEMP/cloned-refs.txt"
+              git -C "$mirror" for-each-ref --format='%(objectname) %(refname)' \
+                refs/heads refs/tags | LC_ALL=C sort > "$actual"
+              diff -u "$MANIFEST" "$actual"
+              echo "mirror=$mirror" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            rm -rf "$mirror"
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$((attempt * 60))"
+            fi
+          done
+          echo "Unable to clone and verify upstream after three attempts." >&2
+          exit 1
+
+      - name: Synchronize managed refs and the default source branch
+        shell: bash
+        env:
+          MIRROR: ${{ steps.clone.outputs.mirror }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git -C "$MIRROR" remote add destination \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Only the managed upstream/* namespace may be force-updated or pruned.
+          git -C "$MIRROR" push --atomic --force --prune destination \
+            '+refs/heads/*:refs/heads/upstream/*'
+
+          # Tags are copied without force. A moved/conflicting tag fails safely for review.
+          git -C "$MIRROR" push --atomic --prune destination \
+            'refs/tags/*:refs/tags/*'
+
+          # Preserve the scheduler on main while making its source tree track upstream's default branch.
+          # main is always rebuilt from the verified upstream default commit plus these two mirror files.
+          git -C "$MIRROR" fetch destination \
+            '+refs/heads/main:refs/heads/mirror-main'
+          overlay="$RUNNER_TEMP/default-branch"
+          git -C "$MIRROR" worktree add --detach "$overlay" \
+            "refs/heads/$UPSTREAM_DEFAULT_BRANCH"
+          mkdir -p "$overlay/.github/workflows"
+          git -C "$MIRROR" show \
+            'refs/heads/mirror-main:.github/workflows/sync-upstream.yml' \
+            > "$overlay/.github/workflows/sync-upstream.yml"
+          git -C "$MIRROR" show 'refs/heads/mirror-main:.github/MIRROR.md' \
+            > "$overlay/.github/MIRROR.md"
+          git -C "$overlay" config user.name 'github-actions[bot]'
+          git -C "$overlay" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$overlay" add .github/workflows/sync-upstream.yml .github/MIRROR.md
+          current=$(git -C "$MIRROR" rev-parse refs/heads/mirror-main)
+          if git -C "$overlay" diff --quiet refs/heads/mirror-main --; then
+            echo "Default branch already matches the verified upstream source."
+          else
+            git -C "$overlay" commit -m \
+              "chore: retain mirror automation atop upstream $(git -C "$MIRROR" rev-parse --short "refs/heads/$UPSTREAM_DEFAULT_BRANCH")"
+            git -C "$overlay" push --force-with-lease="refs/heads/main:$current" \
+              destination HEAD:refs/heads/main
+          fi
+
+          branches=$(git -C "$MIRROR" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+          tags=$(git -C "$MIRROR" for-each-ref --format='%(refname)' refs/tags | wc -l | tr -d ' ')
+          {
+            echo "## ncdu upstream synchronization"
+            echo
+            echo "- Upstream: \`$UPSTREAM_HTTPS\`"
+            echo "- Mirrored branches: $branches"
+            echo "- Mirrored tags: $tags"
+            echo "- Clean source branches: \`upstream/*\`"
+            echo "- Default branch: \`main\`, based on upstream \`$UPSTREAM_DEFAULT_BRANCH\`"
+          } >> "$GITHUB_STEP_SUMMARY"
