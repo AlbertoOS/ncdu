@@ -29,7 +29,7 @@ jobs:
           set -euo pipefail
           manifest="$RUNNER_TEMP/upstream-refs.txt"
           git ls-remote --heads --tags "$UPSTREAM_HTTPS" \
-            | awk '$2 !~ /\\^\\{\\}$/ { print $1 " " $2 }' \
+            | awk '$2 !~ /\^\{\}$/ { print $1 " " $2 }' \
             | LC_ALL=C sort > "$manifest"
           test -s "$manifest"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
